@@ -5,8 +5,8 @@ mod marker;
 pub use self::description::{ComponentDescription, ExampleError};
 pub use self::generate::GenerateConfig;
 pub use self::marker::{
-    ApiComponent, ComponentMarker, EnrichmentTableComponent, ProviderComponent, SecretsComponent,
-    SinkComponent, SourceComponent, TransformComponent,
+    ApiComponent, ComponentMarker, EnrichmentTableComponent, GlobalOptionsComponent,
+    ProviderComponent, SecretsComponent, SinkComponent, SourceComponent, TransformComponent,
 };
 
 // Create some type aliases for the component marker/description types, and collect (register,
@@ -18,6 +18,7 @@ pub type SecretsDescription = ComponentDescription<SecretsComponent>;
 pub type SinkDescription = ComponentDescription<SinkComponent>;
 pub type EnrichmentTableDescription = ComponentDescription<EnrichmentTableComponent>;
 pub type ProviderDescription = ComponentDescription<ProviderComponent>;
+pub type GlobalOptionsDescription = ComponentDescription<GlobalOptionsComponent>;
 
 inventory::collect!(ApiDescription);
 inventory::collect!(SourceDescription);
@@ -26,3 +27,4 @@ inventory::collect!(SecretsDescription);
 inventory::collect!(SinkDescription);
 inventory::collect!(EnrichmentTableDescription);
 inventory::collect!(ProviderDescription);
+inventory::collect!(GlobalOptionsDescription);
