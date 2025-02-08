@@ -1,6 +1,7 @@
 use serde_json::Value;
 use syn::Path;
 
+pub const COMPONENT_TYPE_API: &str = "api";
 pub const COMPONENT_TYPE_ENRICHMENT_TABLE: &str = "enrichment_table";
 pub const COMPONENT_TYPE_PROVIDER: &str = "provider";
 pub const COMPONENT_TYPE_SECRETS: &str = "secrets";
@@ -31,6 +32,7 @@ pub const METADATA: &str = "_metadata";
 /// Well-known component types.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ComponentType {
+    Api,
     EnrichmentTable,
     Provider,
     Secrets,
@@ -43,6 +45,7 @@ impl ComponentType {
     /// Gets the type of this component as a string.
     pub const fn as_str(&self) -> &'static str {
         match self {
+            ComponentType::Api => COMPONENT_TYPE_API,
             ComponentType::EnrichmentTable => COMPONENT_TYPE_ENRICHMENT_TABLE,
             ComponentType::Provider => COMPONENT_TYPE_PROVIDER,
             ComponentType::Secrets => COMPONENT_TYPE_SECRETS,
@@ -62,6 +65,7 @@ impl<'a> TryFrom<&'a str> for ComponentType {
 
     fn try_from(value: &'a str) -> Result<Self, Self::Error> {
         match value {
+            COMPONENT_TYPE_API => Ok(ComponentType::Api),
             COMPONENT_TYPE_ENRICHMENT_TABLE => Ok(ComponentType::EnrichmentTable),
             COMPONENT_TYPE_PROVIDER => Ok(ComponentType::Provider),
             COMPONENT_TYPE_SECRETS => Ok(ComponentType::Secrets),

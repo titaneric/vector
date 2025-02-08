@@ -1,3 +1,5 @@
+/// An API component.
+pub struct ApiComponent;
 /// An enrichment table component.
 pub struct EnrichmentTableComponent;
 
@@ -19,6 +21,7 @@ pub struct TransformComponent;
 // Marker trait representing a component.
 pub trait ComponentMarker: sealed::Sealed {}
 
+impl ComponentMarker for ApiComponent {}
 impl ComponentMarker for EnrichmentTableComponent {}
 impl ComponentMarker for ProviderComponent {}
 impl ComponentMarker for SecretsComponent {}
@@ -29,6 +32,7 @@ impl ComponentMarker for TransformComponent {}
 mod sealed {
     pub trait Sealed {}
 
+    impl Sealed for super::ApiComponent {}
     impl Sealed for super::EnrichmentTableComponent {}
     impl Sealed for super::ProviderComponent {}
     impl Sealed for super::SecretsComponent {}
