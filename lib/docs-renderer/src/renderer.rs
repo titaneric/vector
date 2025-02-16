@@ -5,8 +5,9 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use snafu::Snafu;
 use tracing::debug;
-use vector_config::schema::parser::query::{
-    QueryError, QueryableSchema, SchemaQuerier, SchemaType,
+use vector_config::schema::{
+    parser::query::{QueryError, QueryableSchema, SchemaQuerier, SchemaType},
+    visitors::merge::Mergeable,
 };
 use vector_config_common::constants;
 
@@ -70,6 +71,8 @@ impl RenderData {
         self.with_mut_object(|map| {
             // Split the path, and take the last element as the actual map key to write to.
             let mut segments = path.split('/').collect::<VecDeque<_>>();
+            // Remove the empty string that comes from the leading slash.
+            segments.pop_front();
             let key = segments.pop_back().expect("Path must end with a key.");
 
             // Iterate over the remaining elements, traversing into the root object one level at a
@@ -129,6 +132,8 @@ impl RenderData {
         self.with_mut_object(|map| {
             // Split the path, and take the last element as the actual map key to write to.
             let mut segments = path.split('/').collect::<VecDeque<_>>();
+            // Remove the empty string that comes from the leading slash.
+            segments.pop_front();
             let key = segments
                 .pop_back()
                 .expect("Path cannot point directly to the root. Use `clear` instead.");
@@ -178,7 +183,7 @@ impl RenderData {
         self.root.pointer(path).is_some()
     }
 
-    /// Merges the data from `other` into `self`.
+    /// Merges object from `other` into `self`.
     ///
     /// Uses a "deep" merge strategy, which will recursively merge both objects together. This
     /// strategy behaves as follows:
@@ -198,8 +203,40 @@ impl RenderData {
     /// have the same type on both sides, but the type on the `self` side is an array. When the type
     /// is an array, the value on the `other` side is appended to that array, regardless of the
     /// contents of the array.
-    pub fn merge(&mut self, _other: Self) {
-        todo!()
+    pub fn merge(&mut self, other: Self) {
+        if self.root.is_null() {
+            self.root = other.root;
+            return;
+        } else if other.root.is_null() {
+            return;
+        } else if self.mergeable(&self.root) && self.mergeable(&other.root) {
+            let mut self_root = self.root.clone();
+            self.nested_merge(&mut self_root, &other.root);
+            self.root = self_root;
+        }
+    }
+
+    fn mergeable(&self, value: &Value) -> bool {
+        value.is_array() || value.is_object()
+    }
+
+    fn nested_merge(&self, base: &mut Value, other: &Value) {
+        let mut base_clone = base.clone();
+        match (&mut base_clone, other) {
+            (Value::Object(self_obj), Value::Object(other_obj)) => {
+                for (k, v) in other_obj {
+                    self.nested_merge(self_obj.entry(k).or_insert(Value::Null), v);
+                }
+                *base.as_object_mut().unwrap() = self_obj.clone();
+            }
+            (Value::Array(self_array), Value::Array(other_array)) => {
+                self_array.extend(other_array.clone());
+                *base.as_array_mut().unwrap() = self_array.clone();
+            }
+            _ => {
+                *base = other.clone();
+            }
+        }
     }
 }
 
@@ -420,5 +457,123 @@ fn render_schema_description<T: QueryableSchema>(schema: T) -> Result<Option<Str
             let concatenated = format!("{}\n\n{}", title, description);
             Ok(Some(concatenated.trim().to_string()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn render_data_write() {
+        let mut data = RenderData::default();
+
+        data.write("/root/nested/key2", "weee!");
+
+        let expected = json!({
+            "root": {
+                "nested": {
+                    "key2": "weee!"
+                }
+            }
+        });
+
+        assert_eq!(data.root, expected);
+    }
+
+    #[test]
+    fn render_data_delete() {
+        let mut data = RenderData::default();
+
+        data.write("/root/nested/key2", "weee!");
+        data.write("/root/nested/key3", "wooo!");
+
+        assert!(data.delete("/root/nested/key2"));
+        assert!(!data.delete("/root/nested/key2"));
+        assert!(data.delete("/root/nested/key3"));
+        assert!(!data.delete("/root/nested/key3"));
+    }
+
+    #[test]
+    fn render_data_exists() {
+        let mut data = RenderData::default();
+
+        data.write("/root/nested/key2", "weee!");
+
+        assert!(data.exists("/root/nested/key2"));
+        assert!(!data.exists("/root/nested/key3"));
+    }
+
+    #[test]
+    fn render_data_merge() {
+        let mut data = RenderData::default();
+
+        data.write("/root/nested/key2", "weee!");
+
+        let mut other = RenderData::default();
+        other.write("/root/nested/key3", "wooo!");
+
+        data.merge(other);
+
+        let expected = json!({
+            "root": {
+                "nested": {
+                    "key2": "weee!",
+                    "key3": "wooo!"
+                }
+            }
+        });
+
+        assert_eq!(data.root, expected);
+    }
+
+    #[test]
+    fn render_data_merge_with_array() {
+        let mut data = RenderData::default();
+
+        data.write("/root/nested/key2", "weee!");
+
+        let mut other = RenderData::default();
+        other.write("/root/nested/key3", "wooo!");
+
+        data.write("/root/nested/key4", vec![1, 2, 3]);
+
+        data.merge(other);
+
+        let expected = json!({
+            "root": {
+                "nested": {
+                    "key2": "weee!",
+                    "key3": "wooo!",
+                    "key4": [1, 2, 3]
+                }
+            }
+        });
+        assert_eq!(data.root, expected);
+    }
+    #[test]
+    fn render_data_merge_extend_array() {
+        let mut data = RenderData::default();
+
+        data.write("/root/nested/key2", "weee!");
+        data.write("/root/nested/key4", vec![1, 2, 3]);
+
+        let mut other = RenderData::default();
+        other.write("/root/nested/key3", "wooo!");
+        other.write("/root/nested/key4", vec![4, 5, 6]);
+
+        data.merge(other);
+
+        let expected = json!({
+            "root": {
+                "nested": {
+                    "key2": "weee!",
+                    "key3": "wooo!",
+                    "key4": [1, 2, 3, 4, 5, 6]
+                }
+            }
+        });
+        assert_eq!(data.root, expected);
     }
 }
