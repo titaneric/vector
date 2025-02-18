@@ -6,8 +6,9 @@ use serde_json::{Map, Value};
 use snafu::Snafu;
 use tracing::debug;
 use vector_config::schema::{
-    parser::query::{QueryError, QueryableSchema, SchemaQuerier, SchemaType},
+    parser::query::{OneOrMany, QueryError, QueryableSchema, SchemaQuerier, SchemaType},
     visitors::merge::Mergeable,
+    InstanceType,
 };
 use vector_config_common::constants;
 
@@ -284,7 +285,7 @@ where
         if schema.has_flag_attribute(constants::DOCS_META_TYPE_OVERRIDE)? {
             debug!("Schema has overridden type.");
 
-            data.write("type", "blank");
+            data.write("/type", "blank");
             apply_schema_description(&schema, &mut data)?;
 
             return Ok(data);
@@ -326,9 +327,12 @@ fn render_bare_schema<T: QueryableSchema>(
             // Composite (`allOf`) schemas are indeed the sum of all of their parts, so render each
             // subschema and simply merge the rendered subschemas together.
             for subschema in subschemas {
+                println!("{:?}", subschema);
                 let subschema_renderer = SchemaRenderer::new(querier, subschema);
                 let rendered_subschema = subschema_renderer.render()?;
+                println!("{:?}", rendered_subschema.root);
                 data.merge(rendered_subschema);
+                println!("---");
             }
         }
         SchemaType::OneOf(_subschemas) => {}
@@ -392,12 +396,33 @@ fn render_bare_schema<T: QueryableSchema>(
             // instance type groupings, knowing that _we_ never generate schemas like that, but it's
             // still technically possible in a real-world JSON Schema document... so we should at
             // least make the error message half-way decent so that it explains as much.
-            todo!()
         }
     }
 
     Ok(())
 }
+
+// fn render_typed_schema<T: QueryableSchema>(
+//     querier: &SchemaQuerier,
+//     schema: T,
+//     data: &mut RenderData,
+//     instance_type: OneOrMany<InstanceType>,
+// ) -> Result<RenderData, RenderError> {
+//     match instance_type {
+//         OneOrMany::One(instance_type) => match instance_type {
+//             InstanceType::Array => {}
+//             InstanceType::Boolean => {}
+//             InstanceType::Integer => {}
+//             InstanceType::Null => {}
+//             InstanceType::Number => {}
+//             InstanceType::Object => {}
+//             InstanceType::String => {
+
+//             }
+//         },
+//         OneOrMany::Many(instance_types) => {}
+//     }
+// }
 
 fn apply_schema_default_value<T: QueryableSchema>(
     _schema: T,
@@ -462,8 +487,59 @@ fn render_schema_description<T: QueryableSchema>(schema: T) -> Result<Option<Str
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, collections::BTreeMap};
+
     use super::*;
+    use enum_dispatch::enum_dispatch;
+    use serde::Serialize;
     use serde_json::json;
+    use vector_config::{
+        component::{
+            ApiComponent, ApiDescription, GenerateConfig, GlobalOptionDescription, SinkDescription,
+        },
+        schema::{
+            generate_root_schema, InstanceType, Metadata, ObjectValidation, RootSchema,
+            SchemaGenerator, SchemaObject, SchemaSettings, SingleOrVec,
+        },
+        ConfigurableRef,
+    };
+    use vector_lib::configurable::{configurable_component, impl_generate_config_from_default};
+
+    /// secret backends for test
+    #[configurable_component(sink("all_of_test_case"))]
+    #[serde(deny_unknown_fields)]
+    #[derive(Clone, Debug)]
+    pub struct AllOfTestCase {
+        /// value1 field
+        #[configurable(metadata(docs::required = true))]
+        pub value1: String,
+
+        /// value2 field
+        #[configurable(derived)]
+        #[serde(flatten)]
+        pub value2: AllOfTestCaseInner,
+    }
+
+    impl GenerateConfig for AllOfTestCase {
+        fn generate_config() -> toml::Value {
+            toml::Value::try_from(AllOfTestCase {
+                value1: "test".to_string(),
+                value2: AllOfTestCaseInner {
+                    value3: "test".to_string(),
+                },
+            })
+            .unwrap()
+        }
+    }
+    /// test case for one of
+    #[configurable_component]
+    #[derive(Clone, Debug, Default)]
+    pub struct AllOfTestCaseInner {
+        /// value3 field
+        pub value3: String,
+    }
+
+    impl_generate_config_from_default!(AllOfTestCaseInner);
 
     #[test]
     fn render_data_write() {
@@ -575,5 +651,29 @@ mod tests {
             }
         });
         assert_eq!(data.root, expected);
+    }
+    #[test]
+    fn render_bare_schema_all_of() {
+        let root_schema = generate_root_schema::<AllOfTestCase>().unwrap();
+        let querier = SchemaQuerier::from_root_schema(root_schema).unwrap();
+        let simple_schema = querier
+            .query()
+            .with_custom_attribute_kv("docs::component_name", "all_of_test_case")
+            .run_single()
+            .unwrap();
+        // for s in simple_schema {
+        //     println!("{:?}", s);
+        //     println!("{:?}", s.schema_type());
+        //     println!("---")
+        // }
+        let mut rendered = RenderData::default();
+        render_bare_schema(&querier, simple_schema, &mut rendered).unwrap();
+        // println!("{:?}", rendered.root);
+
+        let expected = json!({
+            "description": "value2 field",
+        });
+
+        assert_eq!(rendered.root, expected);
     }
 }

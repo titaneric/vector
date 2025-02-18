@@ -3160,12 +3160,16 @@ name = "docs-renderer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "enum_dispatch",
+ "inventory",
  "serde",
  "serde_json",
  "snafu 0.7.5",
+ "toml",
  "tracing 0.1.41",
  "vector-config",
  "vector-config-common",
+ "vector-lib",
 ]
 
 [[package]]

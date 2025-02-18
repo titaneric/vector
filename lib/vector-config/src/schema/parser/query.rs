@@ -53,6 +53,16 @@ impl SchemaQuerier {
         Ok(Self { schema })
     }
 
+    pub fn from_schema_value(value: Value) -> Result<Self, QueryError> {
+        let schema = serde_json::from_value(value)?;
+
+        Ok(Self { schema })
+    }
+
+    pub fn from_root_schema(schema: RootSchema) -> Result<Self, QueryError> {
+        Ok(Self { schema })
+    }
+
     pub fn query(&self) -> SchemaQueryBuilder<'_> {
         SchemaQueryBuilder::from_schema(&self.schema)
     }
@@ -173,11 +183,13 @@ impl<'a> SchemaQueryBuilder<'a> {
     }
 }
 
+#[derive(Debug)]
 pub enum OneOrMany<T> {
     One(T),
     Many(Vec<T>),
 }
 
+#[derive(Debug)]
 pub enum SchemaType<'a> {
     /// A set of subschemas in which all must match.
     ///
@@ -371,6 +383,7 @@ impl QueryableSchema for &SchemaObject {
     }
 }
 
+#[derive(Debug)]
 pub struct SimpleSchema<'a> {
     schema: &'a SchemaObject,
 }

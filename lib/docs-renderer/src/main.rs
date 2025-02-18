@@ -33,6 +33,7 @@ fn main() -> Result<()> {
             "Got base component schema for component type '{}'.",
             base_component_type.as_str()
         );
+        break;
 
         // Find all component schemas of the same component type.
         let maybe_component_schemas = querier
@@ -49,33 +50,33 @@ fn main() -> Result<()> {
             base_component_type.as_str()
         );
 
-        let mut rendered_component_schemas = HashMap::new();
+        // let mut rendered_component_schemas = HashMap::new();
 
-        // Render the base component schema.
-        let base_component_schema_renderer = SchemaRenderer::new(&querier, base_component_schema);
-        let rendered_base_component_schema =
-            base_component_schema_renderer.render().context(format!(
-                "Failed to render the base component schema for component type '{}'.",
-                base_component_type.as_str()
-            ))?;
-        rendered_component_schemas.insert(
-            format!("base/{}", base_component_type.as_str()),
-            rendered_base_component_schema,
-        );
+        // // Render the base component schema.
+        // let base_component_schema_renderer = SchemaRenderer::new(&querier, base_component_schema);
+        // let rendered_base_component_schema =
+        //     base_component_schema_renderer.render().context(format!(
+        //         "Failed to render the base component schema for component type '{}'.",
+        //         base_component_type.as_str()
+        //     ))?;
+        // rendered_component_schemas.insert(
+        //     format!("base/{}", base_component_type.as_str()),
+        //     rendered_base_component_schema,
+        // );
 
-        // Render each of the component schemas for this component type.
-        for component_schema in maybe_component_schemas {
-            let component_name = component_schema.component_name().to_string();
-            let component_schema_renderer = SchemaRenderer::new(&querier, component_schema);
-            let rendered_component_schema = component_schema_renderer.render().context(format!(
-                "Failed to render the '{}' component schema.",
-                component_name
-            ))?;
-            rendered_component_schemas.insert(
-                format!("{}s/base/{}", base_component_type.as_str(), component_name),
-                rendered_component_schema,
-            );
-        }
+        // // Render each of the component schemas for this component type.
+        // for component_schema in maybe_component_schemas {
+        //     let component_name = component_schema.component_name().to_string();
+        //     let component_schema_renderer = SchemaRenderer::new(&querier, component_schema);
+        //     let rendered_component_schema = component_schema_renderer.render().context(format!(
+        //         "Failed to render the '{}' component schema.",
+        //         component_name
+        //     ))?;
+        //     rendered_component_schemas.insert(
+        //         format!("{}s/base/{}", base_component_type.as_str(), component_name),
+        //         rendered_component_schema,
+        //     );
+        // }
     }
 
     Ok(())
