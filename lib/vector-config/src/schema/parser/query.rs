@@ -5,7 +5,7 @@ use snafu::Snafu;
 use vector_config_common::{
     attributes::CustomAttribute,
     constants,
-    schema::{InstanceType, RootSchema, Schema, SchemaObject, SingleOrVec},
+    schema::{InstanceType, RootSchema, Schema, SchemaObject, SingleOrVec, DEFINITIONS_PREFIX},
 };
 
 #[derive(Debug, Snafu)]
@@ -102,6 +102,21 @@ impl<'a> SchemaQueryBuilder<'a> {
             value: value.into(),
         });
         self
+    }
+
+    pub fn get_schema_by_name<T: AsRef<str>>(self, schema_name: T) -> Result<Schema, QueryError> {
+        let schema_name = schema_name.as_ref();
+        if schema_name.starts_with(DEFINITIONS_PREFIX) {
+            let schema_name = &schema_name[DEFINITIONS_PREFIX.len()..];
+            return self
+                .schema
+                .definitions
+                .get(schema_name)
+                .ok_or(QueryError::NoMatches)
+                .cloned();
+        } else {
+            return Err(QueryError::NoMatches);
+        }
     }
 
     /// Executes the query, returning all matching schemas.
@@ -246,6 +261,7 @@ pub trait QueryableSchema {
     fn get_attributes(&self, key: &str) -> Option<OneOrMany<CustomAttribute>>;
     fn get_attribute(&self, key: &str) -> Result<Option<CustomAttribute>, QueryError>;
     fn has_flag_attribute(&self, key: &str) -> Result<bool, QueryError>;
+    fn get_reference(&self) -> Option<&str>;
 }
 
 impl<T> QueryableSchema for &T
@@ -274,6 +290,10 @@ where
 
     fn has_flag_attribute(&self, key: &str) -> Result<bool, QueryError> {
         (*self).has_flag_attribute(key)
+    }
+
+    fn get_reference(&self) -> Option<&str> {
+        (*self).get_reference()
     }
 }
 
@@ -381,6 +401,10 @@ impl QueryableSchema for &SchemaObject {
                 }
             })
     }
+
+    fn get_reference(&self) -> Option<&str> {
+        self.reference.as_deref()
+    }
 }
 
 #[derive(Debug)]
@@ -423,6 +447,10 @@ impl QueryableSchema for SimpleSchema<'_> {
 
     fn has_flag_attribute(&self, key: &str) -> Result<bool, QueryError> {
         self.schema.has_flag_attribute(key)
+    }
+
+    fn get_reference(&self) -> Option<&str> {
+        self.schema.get_reference()
     }
 }
 

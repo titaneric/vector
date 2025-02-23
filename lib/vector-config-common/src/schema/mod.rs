@@ -6,7 +6,7 @@ mod gen;
 mod json_schema;
 pub mod visit;
 
-pub(crate) const DEFINITIONS_PREFIX: &str = "#/definitions/";
+pub const DEFINITIONS_PREFIX: &str = "#/definitions/";
 
 // We have chosen the `BTree*` types here instead of hash tables to provide for a consistent
 // ordering of the output elements between runs and changes to the configuration.

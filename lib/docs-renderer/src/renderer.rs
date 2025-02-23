@@ -1,16 +1,23 @@
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    fmt::Debug,
+};
 
-use anyhow::Result;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use snafu::Snafu;
-use tracing::debug;
+use std::sync::{LazyLock, Mutex};
+use tracing::{debug, Instrument};
 use vector_config::schema::{
+    self, generate_any_of_schema,
     parser::query::{OneOrMany, QueryError, QueryableSchema, SchemaQuerier, SchemaType},
     visitors::merge::Mergeable,
-    InstanceType,
+    InstanceType, RootSchema, Schema, SchemaObject, SingleOrVec, SubschemaValidation,
 };
 use vector_config_common::constants;
+
+static EXPANDED_SCHEMA_CACHE: LazyLock<Mutex<HashMap<String, Schema>>> =
+    LazyLock::new(Default::default);
 
 #[derive(Debug, Snafu)]
 pub enum RenderError {
@@ -249,17 +256,20 @@ impl Default for RenderData {
     }
 }
 
-pub struct SchemaRenderer<'a, T> {
+impl From<Value> for RenderData {
+    fn from(item: Value) -> Self {
+        Self { root: item }
+    }
+}
+
+pub struct SchemaRenderer<'a> {
     querier: &'a SchemaQuerier,
-    schema: T,
+    schema: SchemaObject,
     data: RenderData,
 }
 
-impl<'a, T> SchemaRenderer<'a, T>
-where
-    T: QueryableSchema,
-{
-    pub fn new(querier: &'a SchemaQuerier, schema: T) -> Self {
+impl<'a> SchemaRenderer<'a> {
+    pub fn new(querier: &'a SchemaQuerier, schema: SchemaObject) -> Self {
         Self {
             querier,
             schema,
@@ -274,15 +284,19 @@ where
             mut data,
         } = self;
 
+        // println!("{:?}", schema);
+
+        expand_schema_reference(querier, &schema)?;
+
         // If a schema is hidden, then we intentionally do not want to render it.
-        if schema.has_flag_attribute(constants::DOCS_META_HIDDEN)? {
+        if (&schema).has_flag_attribute(constants::DOCS_META_HIDDEN)? {
             debug!("Schema is marked as hidden. Skipping rendering.");
 
             return Ok(data);
         }
 
         // If a schema has an overridden type, we return some barebones render data.
-        if schema.has_flag_attribute(constants::DOCS_META_TYPE_OVERRIDE)? {
+        if (&schema).has_flag_attribute(constants::DOCS_META_TYPE_OVERRIDE)? {
             debug!("Schema has overridden type.");
 
             data.write("/type", "blank");
@@ -317,9 +331,116 @@ where
     }
 }
 
-fn render_bare_schema<T: QueryableSchema>(
-    querier: &SchemaQuerier,
-    schema: T,
+fn expand_schema_reference<'a>(
+    querier: &'a SchemaQuerier,
+    unexpanded_schema: &SchemaObject,
+) -> Result<SchemaObject, RenderError> {
+    let mut schema = unexpanded_schema.clone();
+
+    let original_title = (&unexpanded_schema).title();
+    let original_description = (&unexpanded_schema).description();
+
+    // Expand the top level schema reference, if it exists.
+    let schema_ref = (&unexpanded_schema).get_reference();
+    if let Some(schema_ref) = schema_ref {
+        let schema_ref = schema_ref.to_string();
+        let expanded_schema_ref = {
+            let mut cached_schema_guard = EXPANDED_SCHEMA_CACHE.lock().unwrap();
+            let cached_schema = cached_schema_guard.get(&schema_ref);
+            if let Some(cached_schema) = cached_schema {
+                cached_schema.clone()
+            } else {
+                let expanded_schema_ref = querier.query().get_schema_by_name(schema_ref.clone())?;
+                cached_schema_guard.insert(schema_ref.clone(), expanded_schema_ref.clone());
+                expanded_schema_ref
+            }
+        };
+        schema = expanded_schema_ref.into();
+    }
+
+    match (&schema).schema_type() {
+        SchemaType::Typed(instance_types) => {
+            let instance_type = match instance_types {
+                OneOrMany::One(instance_type) => instance_type,
+                OneOrMany::Many(instance_types) => {
+                    if let Some(instance_type) = instance_types.iter().next() {
+                        instance_type.to_owned()
+                    } else {
+                        return Err(RenderError::Failed {
+                            reason: "instance types must have at least one value".into(),
+                        });
+                    }
+                }
+            };
+            match instance_type {
+                // If the instance type is an array, expand the array items schema.
+                InstanceType::Array => {
+                    let items = schema.array().items.clone().unwrap();
+                    let mut items_schema = items.into_iter();
+                    if let Some(item_schema) = items_schema.next() {
+                        let expanded_items_schema = expand_schema_reference(
+                            querier,
+                            &item_schema.to_owned().into_object(),
+                        )?;
+                        let expanded_items_schema: Schema = expanded_items_schema.into();
+                        let expanded_items_schema: SingleOrVec<Schema> =
+                            expanded_items_schema.into();
+                        schema.array().items = Some(expanded_items_schema);
+                    }
+                }
+                // If the instance type is an object, expand the object properties schemas.
+                InstanceType::Object => {
+                    let properties = schema.object().properties.clone();
+                    schema.object().properties = properties
+                        .into_iter()
+                        .map(|(k, schema)| {
+                            let schema_object = schema.into_object();
+                            let expanded_property_schema =
+                                expand_schema_reference(querier, &schema_object).unwrap();
+                            (k, expanded_property_schema.into())
+                        })
+                        .collect::<BTreeMap<String, Schema>>();
+                }
+                _ => {}
+            }
+        }
+        SchemaType::AllOf(subschemas)
+        | SchemaType::AnyOf(subschemas)
+        | SchemaType::OneOf(subschemas) => {
+            let new_subschemas: Vec<Schema> = subschemas
+                .into_iter()
+                .map(|subschema| {
+                    let schema_object = subschema.into_inner();
+                    let expand_schema_object = expand_schema_reference(querier, schema_object)
+                        .unwrap()
+                        .into();
+                    Schema::Object(expand_schema_object)
+                })
+                .collect::<Vec<_>>();
+
+            if let Some(subschemas) = schema.subschemas.as_mut() {
+                if let Some(_) = subschemas.all_of {
+                    subschemas.all_of = Some(new_subschemas);
+                } else if let Some(_) = subschemas.any_of {
+                    subschemas.any_of = Some(new_subschemas);
+                } else if let Some(_) = subschemas.one_of {
+                    subschemas.one_of = Some(new_subschemas);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let metadata_mut = schema.metadata();
+    metadata_mut.title = original_title.and_then(|s| Some(s.to_string()));
+    metadata_mut.description = original_description.and_then(|s| Some(s.to_string()));
+
+    Ok(schema)
+}
+
+fn render_bare_schema<'a>(
+    querier: &'a SchemaQuerier,
+    schema: &SchemaObject,
     data: &mut RenderData,
 ) -> Result<(), RenderError> {
     match schema.schema_type() {
@@ -327,12 +448,12 @@ fn render_bare_schema<T: QueryableSchema>(
             // Composite (`allOf`) schemas are indeed the sum of all of their parts, so render each
             // subschema and simply merge the rendered subschemas together.
             for subschema in subschemas {
-                println!("{:?}", subschema);
-                let subschema_renderer = SchemaRenderer::new(querier, subschema);
+                let subschema_renderer =
+                    SchemaRenderer::new(querier, subschema.into_inner().clone());
                 let rendered_subschema = subschema_renderer.render()?;
-                println!("{:?}", rendered_subschema.root);
+                // println!("{:?}", rendered_subschema.root);
                 data.merge(rendered_subschema);
-                println!("---");
+                // println!("---");
             }
         }
         SchemaType::OneOf(_subschemas) => {}
@@ -493,53 +614,71 @@ mod tests {
     use enum_dispatch::enum_dispatch;
     use serde::Serialize;
     use serde_json::json;
+    use std::path::PathBuf;
     use vector_config::{
         component::{
             ApiComponent, ApiDescription, GenerateConfig, GlobalOptionDescription, SinkDescription,
         },
         schema::{
-            generate_root_schema, InstanceType, Metadata, ObjectValidation, RootSchema,
-            SchemaGenerator, SchemaObject, SchemaSettings, SingleOrVec,
+            generate_root_schema, generate_root_schema_with_settings, get_or_generate_schema,
+            InstanceType, Metadata, ObjectValidation, RootSchema, Schema, SchemaGenerator,
+            SchemaObject, SchemaSettings, SingleOrVec,
         },
-        ConfigurableRef,
+        Configurable, ConfigurableRef,
     };
     use vector_lib::configurable::{configurable_component, impl_generate_config_from_default};
 
-    /// secret backends for test
-    #[configurable_component(sink("all_of_test_case"))]
-    #[serde(deny_unknown_fields)]
-    #[derive(Clone, Debug)]
-    pub struct AllOfTestCase {
-        /// value1 field
-        #[configurable(metadata(docs::required = true))]
-        pub value1: String,
-
-        /// value2 field
-        #[configurable(derived)]
-        #[serde(flatten)]
-        pub value2: AllOfTestCaseInner,
-    }
-
-    impl GenerateConfig for AllOfTestCase {
-        fn generate_config() -> toml::Value {
-            toml::Value::try_from(AllOfTestCase {
-                value1: "test".to_string(),
-                value2: AllOfTestCaseInner {
-                    value3: "test".to_string(),
-                },
-            })
-            .unwrap()
-        }
-    }
-    /// test case for one of
+    /// array_test_case
     #[configurable_component]
     #[derive(Clone, Debug, Default)]
-    pub struct AllOfTestCaseInner {
-        /// value3 field
-        pub value3: String,
+    pub struct ArrayTestCase(
+        /// reference InnerConfig
+        pub Vec<InnerConfig>,
+    );
+    /// object_test_case
+    #[configurable_component]
+    #[derive(Clone, Debug, Default)]
+    pub struct ObjectTestCase {
+        /// field1
+        pub field1: bool,
+
+        /// field2 should reference stdlib::PathBuf
+        pub field2: PathBuf,
     }
 
-    impl_generate_config_from_default!(AllOfTestCaseInner);
+    /// all_of_test_case
+    #[configurable_component]
+    #[derive(Clone, Debug, Default)]
+    pub struct AllOfTestCase {
+        /// field1
+        pub field1: bool,
+
+        /// inner field should reference InnerConfig
+        #[serde(flatten)]
+        pub inner: InnerConfig,
+    }
+
+    /// inner config
+    #[configurable_component]
+    #[derive(Clone, Debug, Default)]
+    #[serde(deny_unknown_fields)]
+    pub struct InnerConfig {
+        /// field1
+        pub field1: String,
+
+        /// field2
+        pub field2: bool,
+    }
+
+    /// one_of_test_case
+    #[configurable_component]
+    #[derive(Clone, Debug)]
+    pub enum OneOfTestCase {
+        /// Variant1
+        Variant1,
+        /// inner field should reference InnerConfig
+        Variant(InnerConfig),
+    }
 
     #[test]
     fn render_data_write() {
@@ -653,27 +792,206 @@ mod tests {
         assert_eq!(data.root, expected);
     }
     #[test]
-    fn render_bare_schema_all_of() {
-        let root_schema = generate_root_schema::<AllOfTestCase>().unwrap();
+    fn expand_schema_reference_array() {
+        let schema_setting = SchemaSettings::default();
+        let root_schema =
+            generate_root_schema_with_settings::<ArrayTestCase>(schema_setting).unwrap();
+
         let querier = SchemaQuerier::from_root_schema(root_schema).unwrap();
-        let simple_schema = querier
-            .query()
-            .with_custom_attribute_kv("docs::component_name", "all_of_test_case")
-            .run_single()
-            .unwrap();
-        // for s in simple_schema {
-        //     println!("{:?}", s);
-        //     println!("{:?}", s.schema_type());
-        //     println!("---")
-        // }
-        let mut rendered = RenderData::default();
-        render_bare_schema(&querier, simple_schema, &mut rendered).unwrap();
-        // println!("{:?}", rendered.root);
+        let schema_setting = SchemaSettings::default();
+        let schema_generator = schema_setting.into_generator();
+        let ref_schema_gen = RefCell::new(schema_generator);
+        let outer_schema = ArrayTestCase::generate_schema(&ref_schema_gen).unwrap();
+        match (&outer_schema).schema_type() {
+            SchemaType::Typed(OneOrMany::One(InstanceType::Array)) => {}
+            _ => panic!("schema type should be object"),
+        }
 
-        let expected = json!({
-            "description": "value2 field",
-        });
+        let expanded_schema = expand_schema_reference(&querier, &outer_schema).unwrap();
+        let expanded_schema = serde_json::to_value(&expanded_schema).unwrap();
+        // println!("{:?}", serde_json::to_string(&expanded_schema).unwrap());
+        let expected_schema = json!(
+            {
+                "description": "reference InnerConfig",
+                "items": {
+                    "properties": {
+                        "field1": {
+                            "description": "field1",
+                            "type": "string"
+                        },
+                        "field2": {
+                            "description": "field2",
+                            "type": "boolean"
+                        }
+                    },
+                    "required": [
+                        "field1",
+                        "field2"
+                    ],
+                    "type": "object"
+                },
+                "type": "array"
+            }
+        );
+        assert!(expanded_schema == expected_schema);
+    }
+    #[test]
+    fn expand_schema_reference_object() {
+        let schema_setting = SchemaSettings::default();
+        let root_schema =
+            generate_root_schema_with_settings::<ObjectTestCase>(schema_setting).unwrap();
 
-        assert_eq!(rendered.root, expected);
+        let querier = SchemaQuerier::from_root_schema(root_schema).unwrap();
+        let schema_setting = SchemaSettings::default();
+        let schema_generator = schema_setting.into_generator();
+        let ref_schema_gen = RefCell::new(schema_generator);
+        let outer_schema = ObjectTestCase::generate_schema(&ref_schema_gen).unwrap();
+        match (&outer_schema).schema_type() {
+            SchemaType::Typed(OneOrMany::One(InstanceType::Object)) => {}
+            _ => panic!("schema type should be object"),
+        }
+
+        let expanded_schema = expand_schema_reference(&querier, &outer_schema).unwrap();
+        let expanded_schema = serde_json::to_value(&expanded_schema).unwrap();
+        let expected_schema = json!(
+            {
+                "properties": {
+                    "field1": {
+                        "description": "field1",
+                        "type": "boolean"
+                    },
+                    "field2": {
+                        "description": "field2 should reference stdlib::PathBuf",
+                        "pattern": "(\\/.*|[a-zA-Z]:\\\\(?:([^<>:\"\\/\\\\|?*]*[^<>:\"\\/\\\\|?*.]\\\\|..\\\\)*([^<>:\"\\/\\\\|?*]*[^<>:\"\\/\\\\|?*.]\\\\?|..\\\\))?)",
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "field1",
+                    "field2"
+                ],
+                "type": "object"
+            }
+        );
+        assert!(expanded_schema == expected_schema);
+    }
+    #[test]
+    fn expand_schema_reference_all_of() {
+        let schema_setting = SchemaSettings::default();
+        let root_schema =
+            generate_root_schema_with_settings::<AllOfTestCase>(schema_setting).unwrap();
+
+        let querier = SchemaQuerier::from_root_schema(root_schema).unwrap();
+        let schema_setting = SchemaSettings::default();
+        let schema_generator = schema_setting.into_generator();
+        let ref_schema_gen = RefCell::new(schema_generator);
+        let outer_schema = AllOfTestCase::generate_schema(&ref_schema_gen).unwrap();
+        match (&outer_schema).schema_type() {
+            SchemaType::AllOf(_) => {}
+            _ => panic!("schema type should be all_of"),
+        }
+
+        let expanded_schema = expand_schema_reference(&querier, &outer_schema).unwrap();
+        let expanded_schema = serde_json::to_value(&expanded_schema).unwrap();
+        let expected_schema = json!(
+            {
+                "allOf": [
+                    {
+                        "properties": {
+                            "field1": {
+                                "description": "field1",
+                                "type": "boolean"
+                            }
+                        },
+                        "required": [
+                            "field1"
+                        ],
+                        "type": "object"
+                    },
+                    {
+                        "description": "inner field should reference InnerConfig",
+                        "properties": {
+                            "field1": {
+                                "description": "field1",
+                                "type": "string"
+                            },
+                            "field2": {
+                                "description": "field2",
+                                "type": "boolean"
+                            }
+                        },
+                        "required": [
+                            "field1",
+                            "field2"
+                        ],
+                        "type": "object"
+                    }
+                ]
+            }
+        );
+        assert!(expanded_schema == expected_schema);
+    }
+    #[test]
+    fn render_bare_schema_one_of() {
+        let schema_setting = SchemaSettings::default();
+        let root_schema =
+            generate_root_schema_with_settings::<OneOfTestCase>(schema_setting).unwrap();
+
+        let querier = SchemaQuerier::from_root_schema(root_schema).unwrap();
+        let schema_setting = SchemaSettings::default();
+        let schema_generator = schema_setting.into_generator();
+        let ref_schema_gen = RefCell::new(schema_generator);
+        let outer_schema = OneOfTestCase::generate_schema(&ref_schema_gen).unwrap();
+        match (&outer_schema).schema_type() {
+            SchemaType::OneOf(_) => {}
+            _ => panic!("schema type should be one_of"),
+        }
+
+        let expanded_schema = expand_schema_reference(&querier, &outer_schema).unwrap();
+        let expanded_schema = serde_json::to_value(&expanded_schema).unwrap();
+        let expected_schema = json!(
+            {
+                "oneOf": [
+                    {
+                        "description": "Variant1",
+                        "const": "Variant1",
+                        "_metadata": {
+                            "logical_name": "Variant1"
+                        }
+                    },
+                    {
+                        "description": "inner field should reference InnerConfig",
+                        "type": "object",
+                        "required": [
+                            "Variant"
+                        ],
+                        "properties": {
+                            "Variant": {
+                                "description": "inner config",
+                                "type": "object",
+                                "required": [
+                                    "field1",
+                                    "field2"
+                                ],
+                                "properties": {
+                                    "field1": {
+                                        "description": "field1",
+                                        "type": "string"
+                                    },
+                                    "field2": {
+                                        "description": "field2",
+                                        "type": "boolean"
+                                    }
+                                }
+                            }
+                        },
+                        "_metadata": {
+                            "logical_name": "Variant"
+                        }
+                    }
+                ]
+            }
+        );
+        assert!(expanded_schema == expected_schema);
     }
 }
