@@ -5,7 +5,9 @@ use snafu::Snafu;
 use vector_config_common::{
     attributes::CustomAttribute,
     constants,
-    schema::{InstanceType, RootSchema, Schema, SchemaObject, SingleOrVec, DEFINITIONS_PREFIX},
+    schema::{
+        get_cleaned_schema_reference, InstanceType, RootSchema, Schema, SchemaObject, SingleOrVec,
+    },
 };
 
 #[derive(Debug, Snafu)]
@@ -106,17 +108,13 @@ impl<'a> SchemaQueryBuilder<'a> {
 
     pub fn get_schema_by_name<T: AsRef<str>>(self, schema_name: T) -> Result<Schema, QueryError> {
         let schema_name = schema_name.as_ref();
-        if schema_name.starts_with(DEFINITIONS_PREFIX) {
-            let schema_name = &schema_name[DEFINITIONS_PREFIX.len()..];
-            return self
-                .schema
-                .definitions
-                .get(schema_name)
-                .ok_or(QueryError::NoMatches)
-                .cloned();
-        } else {
-            return Err(QueryError::NoMatches);
-        }
+        let schema_name = get_cleaned_schema_reference(schema_name);
+        return self
+            .schema
+            .definitions
+            .get(schema_name)
+            .ok_or(QueryError::NoMatches)
+            .cloned();
     }
 
     /// Executes the query, returning all matching schemas.
@@ -261,7 +259,6 @@ pub trait QueryableSchema {
     fn get_attributes(&self, key: &str) -> Option<OneOrMany<CustomAttribute>>;
     fn get_attribute(&self, key: &str) -> Result<Option<CustomAttribute>, QueryError>;
     fn has_flag_attribute(&self, key: &str) -> Result<bool, QueryError>;
-    fn get_reference(&self) -> Option<&str>;
 }
 
 impl<T> QueryableSchema for &T
@@ -290,10 +287,6 @@ where
 
     fn has_flag_attribute(&self, key: &str) -> Result<bool, QueryError> {
         (*self).has_flag_attribute(key)
-    }
-
-    fn get_reference(&self) -> Option<&str> {
-        (*self).get_reference()
     }
 }
 
@@ -360,10 +353,7 @@ impl QueryableSchema for &SchemaObject {
             })
             .and_then(|attributes| attributes.get(key))
             .map(|attribute| match attribute {
-                Value::Bool(b) => match b {
-                    true => OneOrMany::One(CustomAttribute::flag(key)),
-                    false => panic!("Custom attribute flags should never be false."),
-                },
+                Value::Bool(b) =>  OneOrMany::One(CustomAttribute::kv(key, b)),
                 Value::String(s) => OneOrMany::One(CustomAttribute::kv(key, s)),
                 Value::Array(values) => {
                     let mapped = values.iter()
@@ -400,10 +390,6 @@ impl QueryableSchema for &SchemaObject {
                     }
                 }
             })
-    }
-
-    fn get_reference(&self) -> Option<&str> {
-        self.reference.as_deref()
     }
 }
 
@@ -447,10 +433,6 @@ impl QueryableSchema for SimpleSchema<'_> {
 
     fn has_flag_attribute(&self, key: &str) -> Result<bool, QueryError> {
         self.schema.has_flag_attribute(key)
-    }
-
-    fn get_reference(&self) -> Option<&str> {
-        self.schema.get_reference()
     }
 }
 

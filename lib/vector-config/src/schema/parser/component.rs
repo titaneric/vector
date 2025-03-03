@@ -84,10 +84,6 @@ impl QueryableSchema for ComponentSchema<'_> {
     fn has_flag_attribute(&self, key: &str) -> Result<bool, QueryError> {
         self.schema.has_flag_attribute(key)
     }
-
-    fn get_reference(&self) -> Option<&str> {
-        self.schema.get_reference()
-    }
 }
 
 impl<'a> TryFrom<SimpleSchema<'a>> for ComponentSchema<'a> {
