@@ -1010,6 +1010,7 @@ impl ContainerLogInfo {
         let message = String::from_utf8_lossy(&bytes_message);
         let mut splitter = message.splitn(2, char::is_whitespace);
         let timestamp_str = splitter.next()?;
+        trace!( message = "Received log message.", log_timestamp = %timestamp_str, container_id = %self.id.as_str());
         let timestamp = match DateTime::parse_from_rfc3339(timestamp_str) {
             Ok(timestamp) => {
                 // Timestamp check. This is included to avoid processing the same log multiple times, which can
