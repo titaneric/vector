@@ -8,8 +8,39 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::runtime::watcher;
 use kube::{Api, Client, api::LogParams};
 use std::collections::HashMap;
+use std::fmt;
 use std::pin::Pin;
 use tracing::{info, trace, warn};
+
+/// Container key for identifying unique container instances
+/// Format: "{namespace}/{pod_name}/{container_name}"
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ContainerKey(String);
+
+impl fmt::Display for ContainerKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<&ContainerInfo> for ContainerKey {
+    fn from(container_info: &ContainerInfo) -> Self {
+        ContainerKey(format!(
+            "{}/{}/{}",
+            container_info.namespace, container_info.pod_name, container_info.container_name
+        ))
+    }
+}
+
+impl From<(&PodInfo, &str)> for ContainerKey {
+    fn from((pod_info, container_name): (&PodInfo, &str)) -> Self {
+        ContainerKey(format!(
+            "{}/{}/{}",
+            pod_info.namespace, pod_info.name, container_name
+        ))
+    }
+}
+
 /// Container information for log tailing
 #[derive(Clone, Debug)]
 pub struct ContainerInfo {
@@ -97,7 +128,7 @@ impl ContainerLogInfo {
 
 pub struct Reconciler {
     esb: EventStreamBuilder,
-    states: HashMap<String, TailerState>, // Keyed by "namespace/pod/container"
+    states: HashMap<ContainerKey, TailerState>, // Keyed by ContainerKey
     pod_watcher: Pin<Box<dyn Stream<Item = watcher::Result<watcher::Event<Pod>>> + Send>>,
 }
 
@@ -123,12 +154,17 @@ impl Reconciler {
         // Listen to pod watcher events for real-time reconciliation
         while let Some(event) = self.pod_watcher.next().await {
             match event {
-                Ok(watcher::Event::Apply(pod)) => {
+                Ok(watcher::Event::Delete(pod)) => {
+                    let pod_info = PodInfo::from(&pod);
+                    info!("Pod '{}' deleted, cleaning up log tailers", pod_info.name);
+                    self.cleanup_pod_tailers(&pod_info).await;
+                }
+                Ok(watcher::Event::InitApply(pod)) | Ok(watcher::Event::Apply(pod)) => {
                     let pod_info = PodInfo::from(&pod);
                     if let Some(phase) = &pod_info.phase {
                         if phase == "Running" {
                             info!(
-                                "Pod '{}' is now running, starting log reconciliation",
+                                "Pod '{}' is running, starting log reconciliation",
                                 pod_info.name
                             );
                             if let Err(e) = self.reconcile_pod_containers(&pod_info).await {
@@ -137,36 +173,7 @@ impl Reconciler {
                         }
                     }
                 }
-                Ok(watcher::Event::Delete(pod)) => {
-                    let pod_info = PodInfo::from(&pod);
-                    info!("Pod '{}' deleted, cleaning up log tailers", pod_info.name);
-                    self.cleanup_pod_tailers(&pod_info).await;
-                }
-                Ok(watcher::Event::Init) => {
-                    info!("Pod watcher initialized - ready for event-driven reconciliation");
-                }
-                Ok(watcher::Event::InitApply(pod)) => {
-                    let pod_info = PodInfo::from(&pod);
-                    if let Some(phase) = &pod_info.phase {
-                        if phase == "Running" {
-                            info!(
-                                "Pod '{}' is running during init, starting log reconciliation",
-                                pod_info.name
-                            );
-                            if let Err(e) = self.reconcile_pod_containers(&pod_info).await {
-                                warn!(
-                                    "Failed to reconcile pod '{}' during init: {}",
-                                    pod_info.name, e
-                                );
-                            }
-                        }
-                    }
-                }
-                Ok(watcher::Event::InitDone) => {
-                    info!(
-                        "Pod watcher init complete - fully ready for event-driven reconciliation"
-                    );
-                }
+                Ok(_) => {}
                 Err(e) => {
                     warn!("Pod watcher error: {}", e);
                 }
@@ -186,10 +193,7 @@ impl Reconciler {
                 pod_uid: pod_info.uid.clone(),
             };
 
-            let key = format!(
-                "{}/{}/{}",
-                container_info.namespace, container_info.pod_name, container_info.container_name
-            );
+            let key = ContainerKey::from(&container_info);
 
             // Only start tailer if not already running
             if !self.states.contains_key(&key) {
@@ -209,10 +213,7 @@ impl Reconciler {
     /// Clean up tailers for a deleted pod
     async fn cleanup_pod_tailers(&mut self, pod_info: &PodInfo) {
         for container_name in &pod_info.containers {
-            let key = format!(
-                "{}/{}/{}",
-                pod_info.namespace, pod_info.name, container_name
-            );
+            let key = ContainerKey::from((pod_info, container_name.as_str()));
 
             if self.states.remove(&key).is_some() {
                 info!(
