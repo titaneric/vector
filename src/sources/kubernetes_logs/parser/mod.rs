@@ -1,3 +1,4 @@
+mod api;
 mod cri;
 mod docker;
 mod test_util;
@@ -21,19 +22,24 @@ enum ParserState {
 
     /// CRI is being used.
     Cri(cri::Cri),
+
+    /// API log is being used.
+    Api(api::Api),
 }
 
 #[derive(Clone, Debug)]
 pub struct Parser {
     state: ParserState,
     log_namespace: LogNamespace,
+    is_api_log: bool,
 }
 
 impl Parser {
-    pub const fn new(log_namespace: LogNamespace) -> Self {
+    pub const fn new(log_namespace: LogNamespace, is_api_log: bool) -> Self {
         Self {
             state: ParserState::Uninitialized,
             log_namespace,
+            is_api_log,
         }
     }
 }
@@ -63,15 +69,20 @@ impl FunctionTransform for Parser {
                     }
                 };
 
-                self.state = if bytes.len() > 1 && bytes[0] == b'{' {
-                    ParserState::Docker(docker::Docker::new(self.log_namespace))
+                if self.is_api_log {
+                    self.state = ParserState::Api(api::Api::new(self.log_namespace));
                 } else {
-                    ParserState::Cri(cri::Cri::new(self.log_namespace))
-                };
+                    self.state = if bytes.len() > 1 && bytes[0] == b'{' {
+                        ParserState::Docker(docker::Docker::new(self.log_namespace))
+                    } else {
+                        ParserState::Cri(cri::Cri::new(self.log_namespace))
+                    };
+                }
                 self.transform(output, event)
             }
             ParserState::Docker(t) => t.transform(output, event),
             ParserState::Cri(t) => t.transform(output, event),
+            ParserState::Api(t) => t.transform(output, event),
         }
     }
 }
@@ -106,7 +117,7 @@ mod tests {
     fn test_parsing_valid_vector_namespace() {
         trace_init();
         test_util::test_parser(
-            || Parser::new(LogNamespace::Vector),
+            || Parser::new(LogNamespace::Vector, false),
             |bytes| Event::Log(LogEvent::from(value!(bytes))),
             valid_cases(LogNamespace::Vector),
         );
@@ -116,7 +127,7 @@ mod tests {
     fn test_parsing_valid_legacy_namespace() {
         trace_init();
         test_util::test_parser(
-            || Parser::new(LogNamespace::Legacy),
+            || Parser::new(LogNamespace::Legacy, false),
             |bytes| Event::Log(LogEvent::from(bytes)),
             valid_cases(LogNamespace::Legacy),
         );
@@ -129,7 +140,7 @@ mod tests {
         let cases = invalid_cases();
 
         for bytes in cases {
-            let mut parser = Parser::new(LogNamespace::Legacy);
+            let mut parser = Parser::new(LogNamespace::Legacy, false);
             let input = LogEvent::from(bytes);
             let mut output = OutputBuffer::default();
             parser.transform(&mut output, input.into());
@@ -158,7 +169,7 @@ mod tests {
         ];
 
         for (input, log_namespace) in cases {
-            let mut parser = Parser::new(log_namespace);
+            let mut parser = Parser::new(log_namespace, false);
             let mut output = OutputBuffer::default();
             parser.transform(&mut output, input.into());
 

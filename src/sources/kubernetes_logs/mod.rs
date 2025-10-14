@@ -950,7 +950,7 @@ impl Source {
             event
         });
 
-        let mut parser = Parser::new(log_namespace);
+        let mut parser = Parser::new(log_namespace, api_log);
         let events = events.flat_map(move |event| {
             let mut buf = OutputBuffer::with_capacity(1);
             parser.transform(&mut buf, event);

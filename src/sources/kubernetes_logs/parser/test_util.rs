@@ -57,6 +57,33 @@ pub fn make_log_event(
     Event::Log(log)
 }
 
+/// Build a api log event for test purposes.
+///
+/// The implementation is shared, and therefore consistent across all
+/// the parsers.
+pub fn make_api_log_event(message: Value, timestamp: &str, log_namespace: LogNamespace) -> Event {
+    let timestamp = DateTime::parse_from_rfc3339(timestamp)
+        .expect("invalid timestamp in test case")
+        .with_timezone(&Utc);
+
+    let log = match log_namespace {
+        LogNamespace::Vector => {
+            let mut log = LogEvent::from(value!(message));
+            log.insert(metadata_path!(Config::NAME, "timestamp"), timestamp);
+            log
+        }
+        LogNamespace::Legacy => {
+            let mut log = LogEvent::default();
+
+            log.insert(event_path!("message"), message);
+            log.insert(event_path!("timestamp"), timestamp);
+            log
+        }
+    };
+
+    Event::Log(log)
+}
+
 /// Shared logic for testing parsers.
 ///
 /// Takes a parser builder and a list of test cases.
