@@ -998,9 +998,8 @@ impl Source {
                             log_with_metadata.pod_name,
                             log_with_metadata.container_name
                         );
-                        let text = Bytes::from(log_with_metadata.log_line);
+                        let text = log_with_metadata.log_line;
                         let text_len = text.len() as u64;
-
                         let line = vector_lib::file_source::file_server::Line {
                             text,
                             filename,
