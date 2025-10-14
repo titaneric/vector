@@ -12,6 +12,19 @@ use std::fmt;
 use std::pin::Pin;
 use tracing::{info, trace, warn};
 
+/// Log line with associated container metadata
+#[derive(Clone, Debug)]
+pub struct LogWithMetadata {
+    /// The actual log content
+    pub log_line: String,
+    /// Pod name
+    pub pod_name: String,
+    /// Namespace name
+    pub namespace_name: String,
+    /// Container name
+    pub container_name: String,
+}
+
 /// Container key for identifying unique container instances
 /// Format: "{namespace}/{pod_name}/{container_name}"
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -133,7 +146,11 @@ pub struct Reconciler {
 }
 
 impl Reconciler {
-    pub fn new<S>(client: Client, log_sender: mpsc::UnboundedSender<String>, pod_watcher: S) -> Self
+    pub fn new<S>(
+        client: Client,
+        log_sender: mpsc::UnboundedSender<LogWithMetadata>,
+        pod_watcher: S,
+    ) -> Self
     where
         S: Stream<Item = watcher::Result<watcher::Event<Pod>>> + Send + 'static,
     {
@@ -228,7 +245,7 @@ impl Reconciler {
 #[derive(Clone)]
 struct EventStreamBuilder {
     client: Client,
-    log_sender: mpsc::UnboundedSender<String>,
+    log_sender: mpsc::UnboundedSender<LogWithMetadata>,
 }
 
 #[derive(Clone)]
@@ -293,8 +310,15 @@ impl EventStreamBuilder {
                         );
                     }
 
-                    // Send the log line to the channel
-                    if let Err(_) = self.log_sender.send(line_result).await {
+                    // Send the log line with metadata to the channel
+                    let log_with_metadata = LogWithMetadata {
+                        log_line: line_result,
+                        pod_name: log_info.container_info.pod_name.clone(),
+                        namespace_name: log_info.container_info.namespace.clone(),
+                        container_name: log_info.container_info.container_name.clone(),
+                    };
+
+                    if let Err(_) = self.log_sender.send(log_with_metadata).await {
                         warn!(
                             "Log channel closed for container '{}' in pod '{}', stopping stream",
                             log_info.container_info.container_name,

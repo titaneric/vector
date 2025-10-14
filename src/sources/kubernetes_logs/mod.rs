@@ -74,7 +74,7 @@ mod util;
 use self::{
     namespace_metadata_annotator::NamespaceMetadataAnnotator,
     node_metadata_annotator::NodeMetadataAnnotator, parser::Parser,
-    pod_metadata_annotator::PodMetadataAnnotator,
+    pod_metadata_annotator::PodMetadataAnnotator, reconciler::LogWithMetadata,
 };
 
 /// The `self_node_name` value env var key.
@@ -736,8 +736,8 @@ impl Source {
         let pod_watcher = watcher(
             pods,
             watcher::Config {
-                field_selector: Some(field_selector),
-                label_selector: Some(label_selector),
+                field_selector: Some(field_selector.clone()),
+                label_selector: Some(label_selector.clone()),
                 list_semantic: list_semantic.clone(),
                 page_size: get_page_size(use_apiserver_cache),
                 ..Default::default()
@@ -751,6 +751,10 @@ impl Source {
             let reconciler_watcher = watcher(
                 reconciler_pods,
                 watcher::Config {
+                    field_selector: Some(field_selector),
+                    label_selector: Some(label_selector),
+                    list_semantic: list_semantic.clone(),
+                    page_size: get_page_size(use_apiserver_cache),
                     ..Default::default()
                 },
             )
@@ -916,34 +920,32 @@ impl Source {
                 log_namespace,
             );
 
-            if !api_log {
-                let file_info = annotator.annotate(&mut event, &line.filename);
-                emit!(KubernetesLogsEventsReceived {
-                    file: &line.filename,
-                    byte_size: event.estimated_json_encoded_size_of(),
-                    pod_info: file_info.as_ref().map(|info| KubernetesLogsPodInfo {
-                        name: info.pod_name.to_owned(),
-                        namespace: info.pod_namespace.to_owned(),
-                    }),
-                });
+            let file_info = annotator.annotate(&mut event, &line.filename);
+            emit!(KubernetesLogsEventsReceived {
+                file: &line.filename,
+                byte_size: event.estimated_json_encoded_size_of(),
+                pod_info: file_info.as_ref().map(|info| KubernetesLogsPodInfo {
+                    name: info.pod_name.to_owned(),
+                    namespace: info.pod_namespace.to_owned(),
+                }),
+            });
 
-                if file_info.is_none() {
-                    emit!(KubernetesLogsEventAnnotationError { event: &event });
-                } else {
-                    let namespace = file_info.as_ref().map(|info| info.pod_namespace);
+            if file_info.is_none() {
+                emit!(KubernetesLogsEventAnnotationError { event: &event });
+            } else {
+                let namespace = file_info.as_ref().map(|info| info.pod_namespace);
 
-                    if insert_namespace_fields
-                        && let Some(name) = namespace
-                        && ns_annotator.annotate(&mut event, name).is_none()
-                    {
-                        emit!(KubernetesLogsEventNamespaceAnnotationError { event: &event });
-                    }
+                if insert_namespace_fields
+                    && let Some(name) = namespace
+                    && ns_annotator.annotate(&mut event, name).is_none()
+                {
+                    emit!(KubernetesLogsEventNamespaceAnnotationError { event: &event });
+                }
 
-                    let node_info = node_annotator.annotate(&mut event, self_node_name.as_str());
+                let node_info = node_annotator.annotate(&mut event, self_node_name.as_str());
 
-                    if node_info.is_none() {
-                        emit!(KubernetesLogsEventNodeAnnotationError { event: &event });
-                    }
+                if node_info.is_none() {
+                    emit!(KubernetesLogsEventNodeAnnotationError { event: &event });
                 }
             }
 
@@ -970,7 +972,8 @@ impl Source {
 
         // Only run reconciler when api_log is enabled
         let reconciler_fut = if let Some(reconciler_watcher) = reconciler_pod_watcher {
-            let (api_logs_tx, mut api_logs_rx) = futures::channel::mpsc::unbounded::<String>();
+            let (api_logs_tx, mut api_logs_rx) =
+                futures::channel::mpsc::unbounded::<LogWithMetadata>();
             let reconciler =
                 reconciler::Reconciler::new(client.clone(), api_logs_tx, reconciler_watcher);
 
@@ -987,11 +990,15 @@ impl Source {
                 let log_processing_task = tokio::spawn(async move {
                     let mut file_source_tx = file_source_tx_clone;
                     // Process incoming logs from the channel
-                    while let Some(log_line) = api_logs_rx.next().await {
-                        // Create a simple Line struct to reuse the existing pipeline
-                        // TODO: Extract proper metadata from reconciler context
-                        let filename = "k8s-api://unknown/unknown/unknown".to_string();
-                        let text = Bytes::from(log_line);
+                    while let Some(log_with_metadata) = api_logs_rx.next().await {
+                        // Create a filename that includes the container metadata for proper annotation
+                        let filename = format!(
+                            "k8s-api://{}/{}/{}",
+                            log_with_metadata.namespace_name,
+                            log_with_metadata.pod_name,
+                            log_with_metadata.container_name
+                        );
+                        let text = Bytes::from(log_with_metadata.log_line);
                         let text_len = text.len() as u64;
 
                         let line = vector_lib::file_source::file_server::Line {

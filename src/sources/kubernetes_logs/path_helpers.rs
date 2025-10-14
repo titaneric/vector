@@ -31,9 +31,26 @@ pub(super) fn build_pod_logs_directory(
 /// Parses pod log file path and returns the log file info.
 ///
 /// Assumes the input is a valid pod log file name.
+/// Supports both traditional filesystem paths and k8s-api:// format.
 ///
 /// Inspired by <https://github.com/kubernetes/kubernetes/blob/31305966789525fca49ec26c289e565467d1f1c4/pkg/kubelet/kuberuntime/helpers.go#L186>
 pub(super) fn parse_log_file_path(path: &str) -> Option<LogFileInfo<'_>> {
+    // Handle k8s-api:// format: k8s-api://namespace/pod/container
+    if let Some(api_path) = path.strip_prefix("k8s-api://") {
+        let mut api_components = api_path.split('/');
+        let pod_namespace = api_components.next()?;
+        let pod_name = api_components.next()?;
+        let container_name = api_components.next()?;
+
+        return Some(LogFileInfo {
+            pod_namespace,
+            pod_name,
+            pod_uid: "api-log", // Use a placeholder UID for API logs
+            container_name,
+        });
+    }
+
+    // Handle traditional filesystem paths
     let mut components = path.rsplit(std::path::MAIN_SEPARATOR);
 
     let _log_file_name = components.next()?;
@@ -121,7 +138,7 @@ mod tests {
         );
         let s_path = path.as_str();
         let cases = vec![
-            // Valid inputs.
+            // Valid filesystem path inputs.
             (
                 s_path,
                 Some(LogFileInfo {
@@ -131,8 +148,29 @@ mod tests {
                     container_name: "sandbox0-container0-name",
                 }),
             ),
+            // Valid API log format inputs.
+            (
+                "k8s-api://my-namespace/my-pod/my-container",
+                Some(LogFileInfo {
+                    pod_namespace: "my-namespace",
+                    pod_name: "my-pod",
+                    pod_uid: "api-log",
+                    container_name: "my-container",
+                }),
+            ),
+            (
+                "k8s-api://kube-system/nginx-deployment-abc123/nginx",
+                Some(LogFileInfo {
+                    pod_namespace: "kube-system",
+                    pod_name: "nginx-deployment-abc123",
+                    pod_uid: "api-log",
+                    container_name: "nginx",
+                }),
+            ),
             // Invalid inputs.
             ("/var/log/pods/other", None),
+            ("k8s-api://incomplete", None),
+            ("k8s-api://namespace/pod", None), // Missing container
             ("qwe", None),
             ("", None),
         ];
