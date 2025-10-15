@@ -236,6 +236,19 @@ generated: components: sources: datadog_agent: configuration: {
 							examples: ["package.Message"]
 						}
 					}
+					use_json_names: {
+						description: """
+																Use JSON field names (camelCase) instead of protobuf field names (snake_case).
+
+																When enabled, the deserializer will output fields using their JSON names as defined
+																in the `.proto` file (e.g., `jobDescription` instead of `job_description`).
+
+																This is useful when working with data that needs to be converted to JSON or
+																when interfacing with systems that use JSON naming conventions.
+																"""
+						required: false
+						type: bool: default: false
+					}
 				}
 			}
 			syslog: {
@@ -540,6 +553,16 @@ generated: components: sources: datadog_agent: configuration: {
 			"""
 		required: false
 		type: bool: default: false
+	}
+	split_metric_namespace: {
+		description: """
+			If this is set to `true`, metric names are split at the first '.' into a namespace and name.
+			For example, `system.cpu.usage` would be split into namespace `system` and name `cpu.usage`.
+			If `false`, the full metric name is used without splitting. This may be useful if you are using a
+			default namespace for metrics in sinks connected to this source.
+			"""
+		required: false
+		type: bool: default: true
 	}
 	store_api_key: {
 		description: """
