@@ -87,7 +87,7 @@ impl InternalEvent for EncoderSerializeError<'_> {
         let reason = "Failed serializing frame.";
         error!(
             message = reason,
-            error = %self.error,
+            error = ?self.error,
             error_code = "encoder_serialize",
             error_type = error_type::ENCODER_FAILED,
             stage = error_stage::SENDING,

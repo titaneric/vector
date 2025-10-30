@@ -230,6 +230,9 @@ pub fn try_from(value: AvroValue) -> vector_common::Result<VrlValue> {
         AvroValue::Uuid(uuid) => Ok(VrlValue::from(uuid.as_hyphenated().to_string())),
         AvroValue::LocalTimestampMillis(ts_millis) => Ok(VrlValue::from(ts_millis)),
         AvroValue::LocalTimestampMicros(ts_micros) => Ok(VrlValue::from(ts_micros)),
+        apache_avro::types::Value::BigDecimal(_)
+        | apache_avro::types::Value::TimestampNanos(_)
+        | apache_avro::types::Value::LocalTimestampNanos(_) => todo!(),
     }
 }
 
